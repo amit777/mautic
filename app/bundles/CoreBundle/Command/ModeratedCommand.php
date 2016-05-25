@@ -37,6 +37,58 @@ abstract class ModeratedCommand extends ContainerAwareCommand
      */
     protected function checkRunStatus(InputInterface $input, OutputInterface $output, $key)
     {
+      $force     = $input->getOption('force');
+      $timeout   = $this->getContainer()->hasParameter('mautic.command_timeout') ?
+        $this->getContainer()->getParameter('mautic.command_timeout') : 1800;
+
+      $checkFile = $this->checkfile = $this->getContainer()->getParameter('kernel.cache_dir').'/../script_executions.json';
+      $command   = $this->getName();
+      $this->key = $key;
+
+      $fp = fopen($checkFile, 'c+');
+
+      if (!flock($fp, LOCK_EX)) {
+        $output->writeln("<error>checkRunStatus() - flock failed on {$checkFile} - taking our chances like we used to.</error>");
+      }
+
+      $this->executionTimes = json_decode(fgets($fp, 8192), true);
+      if (!is_array($this->executionTimes)) {
+        $this->executionTimes = array();
+      }
+
+      if ($force || empty($this->executionTimes['in_progress'][$command][$key])) {
+        // Just started
+        $this->executionTimes['in_progress'][$command][$key] = time();
+      } else {
+        // In progress
+        $check = $this->executionTimes['in_progress'][$command][$key];
+
+        if ($check + $timeout <= time()) {
+          $this->executionTimes['in_progress'][$command][$key] = time();
+        } else {
+          $output->writeln('<error>Script in progress. Use -f or --force to force execution.</error>');
+
+          flock($fp, LOCK_UN);
+          fclose($fp);
+
+          return false;
+        }
+      }
+
+      ftruncate($fp, 0);
+      rewind($fp);
+
+      fputs($fp, json_encode($this->executionTimes));
+      fflush($fp);
+
+      flock($fp, LOCK_UN);
+      fclose($fp);
+
+      return true;
+    }
+
+/*    protected function checkRunStatus(InputInterface $input, OutputInterface $output, $key)
+    {
         $force     = $input->getOption('force');
         $timeout   = $this->getContainer()->hasParameter('mautic.command_timeout') ?
             $this->getContainer()->getParameter('mautic.command_timeout') : 1800;
@@ -48,40 +100,75 @@ abstract class ModeratedCommand extends ContainerAwareCommand
             // Get the time in the file
             $this->executionTimes = json_decode(file_get_contents($checkFile), true);
             if (!is_array($this->executionTimes)) {
-                $this->executionTimes = array();
+              $this->executionTimes = array();
             }
 
             if ($force || empty($this->executionTimes['in_progress'][$command][$key])) {
-                // Just started
-                $this->executionTimes['in_progress'][$command][$key] = time();
+              // Just started
+              $this->executionTimes['in_progress'][$command][$key] = time();
             } else {
-                // In progress
-                $check = $this->executionTimes['in_progress'][$command][$key];
+              // In progress
+              $check = $this->executionTimes['in_progress'][$command][$key];
 
-                if ($check + $timeout <= time()) {
-                    $this->executionTimes['in_progress'][$command][$key] = time();
-                } else {
-                    $output->writeln('<error>Script in progress. Use -f or --force to force execution.</error>');
+              if ($check + $timeout <= time()) {
+                $this->executionTimes['in_progress'][$command][$key] = time();
+              } else {
+                $output->writeln('<error>Script in progress. Use -f or --force to force execution.</error>');
 
-                    return false;
-                }
+                return false;
+              }
             }
         } else {
-            // Just started
-            $this->executionTimes['in_progress'][$command][$key] = time();
+          // Just started
+          $this->executionTimes['in_progress'][$command][$key] = time();
         }
 
         file_put_contents($this->checkfile, json_encode($this->executionTimes));
 
         return true;
-    }
+    }*/
 
     /**
      * Complete this run
      */
-    protected function completeRun()
+
+    protected function completeRun($output = null)
+    {
+      $fp = fopen($this->checkfile, 'c+');
+
+      flock($fp, LOCK_EX);
+
+      $this->executionTimes = json_decode(fgets($fp, 8192), true);
+      if (!is_array($this->executionTimes)) {
+        if ($output) {
+          $output->writeln('<error>completeRun() - We should have read an array of times</error>');
+        }
+      }
+      else
+      {
+        // Our task has ended so remove the start time
+        unset($this->executionTimes['in_progress'][$this->getName()][$this->key]);
+
+        // If there's no other info stored for our task then we remove our task
+        // key too, though storing the last time that we ran and how long it took
+        // might be useful for audit / debugging purposes.
+        if (empty($this->executionTimes['in_progress'][$this->getName()])) {
+          unset($this->executionTimes['in_progress'][$this->getName()]);
+        }
+
+        ftruncate($fp, 0);
+        rewind($fp);
+
+        fputs($fp, json_encode($this->executionTimes));
+        fflush($fp);
+      }
+
+      flock($fp, LOCK_UN);
+      fclose($fp);
+    }
+    /*protected function completeRun()
     {
         unset($this->executionTimes['in_progress'][$this->getName()][$this->key]);
         file_put_contents($this->checkfile, json_encode($this->executionTimes));
-    }
+    }*/
 }
